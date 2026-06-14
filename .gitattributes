@@ -1,0 +1,3 @@
+*.toml linguist-detectable=true
+*.toml linguist-documentation=false
+*.toml linguist-language=TOML
