@@ -1,1 +1,61 @@
+[kernel]
+# Wersja jądra do pobrania i zbudowania (upstream Linux)
+version        = "7.1"
 
+# Nazwa jądra / lokalna wersja (pojawi się w uname -r)
+localversion   = "-legendaryos"
+
+# Skrót architektury (x86_64 / aarch64)
+arch           = "x86_64"
+
+# Dodatkowe tagi do numeru release'u RPM
+release_tag    = "1.legendaryos"
+
+[build]
+# Liczba wątków kompilacji (0 = auto: nproc)
+jobs           = 0
+
+# Katalog tymczasowy na źródła i build
+build_dir      = "/tmp/legendaryos-kernel-build"
+
+# Gdzie trafiają gotowe .rpm
+output_dir     = "./output"
+
+# Katalog z patchami (src/patches/*.patch — stosowane po kolei)
+patches_dir    = "./patches"
+
+# Plik .config do użycia jako baza (ścieżka względna lub "fedora" = pobierz z kernela Fedory)
+base_config    = "fedora"
+
+# Optymalizacje O3 zamiast O2
+optimize_o3    = true
+
+# Wyczyść drzewo źródłowe przed buildem
+clean_build    = true
+
+[nvidia]
+# Czy dostosowywać konfigurację pod NVIDIA akmod
+enable         = true
+
+# Włącz CONFIG_MODULE_SIG=n (wymagane przez akmod bez Secure Boot)
+disable_module_signing = true
+
+# Wymuś CONFIG_KALLSYMS_ALL=y (potrzebne przez niektóre wersje sterownika)
+kallsyms_all   = true
+
+# Wymuś CONFIG_DMABUF_HEAPS=y (NVIDIA GSP firmware)
+dmabuf_heaps   = true
+
+[github]
+# Token GitHub do tworzenia Release + uploadu assetów
+# USTAW przez zmienną środowiskową LEGENDARYOS_GITHUB_TOKEN zamiast tu —
+# wpis poniżej jest fallbackiem (zostaw pusty na repo publicznym!)
+token          = ""
+
+# Właściciel i nazwa repozytorium
+owner          = "LegendaryOS-Linux-System"
+repo           = "LegendaryOS-Kernel"
+
+# Szablon URL pobierania (używany w specfile %Source0)
+# Zmienne {version} i {arch} są podstawiane automatycznie
+download_url   = "https://github.com/LegendaryOS-Linux-System/LegendaryOS-Kernel/releases/download/v{version}/legendaryos-kernel-{version}-{arch}.tar.xz"
