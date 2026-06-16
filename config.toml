@@ -1,11 +1,16 @@
+# ============================================================
+#  LegendaryOS Kernel — Build Configuration
+#  Rywal Bazzite: BORE + NTSYNC + sched_ext + BBR v3 + multi-CPU
+# ============================================================
+
 [kernel]
-# Wersja jądra do pobrania i zbudowania (upstream Linux)
+# Wersja jądra do pobrania i zbudowania (upstream Linux >= 6.14 wymagane dla NTSYNC)
 version        = "7.1"
 
 # Nazwa jądra / lokalna wersja (pojawi się w uname -r)
 localversion   = "-legendaryos"
 
-# Skrót architektury (x86_64 / aarch64)
+# Skrót architektury
 arch           = "x86_64"
 
 # Dodatkowe tagi do numeru release'u RPM
@@ -21,41 +26,77 @@ build_dir      = "/tmp/legendaryos-kernel-build"
 # Gdzie trafiają gotowe .rpm
 output_dir     = "./output"
 
-# Katalog z patchami (src/patches/*.patch — stosowane po kolei)
+# Katalog z patchami użytkownika (*.patch stosowane po kolei, po patchach wbudowanych)
 patches_dir    = "./patches"
 
-# Plik .config do użycia jako baza (ścieżka względna lub "fedora" = pobierz z kernela Fedory)
+# Plik .config do użycia jako baza
+# "fedora" = skopiuj z działającego jądra lub pobierz z Fedora SCM
 base_config    = "fedora"
 
-# Optymalizacje O3 zamiast O2
+# Optymalizacje -O3 zamiast -O2
 optimize_o3    = true
 
 # Wyczyść drzewo źródłowe przed buildem
 clean_build    = true
 
+# Kompilator: "gcc" lub "clang" (clang = Thin LTO)
+compiler       = "gcc"
+
+# Thin LTO (działa tylko z compiler = "clang")
+lto_thin       = false
+
+# ============================================================
+# Poziom CPU (x86-64 microarchitecture level)
+# Dozwolone wartości:
+#   "generic"  — x86-64-v1  (każdy 64-bitowy CPU, w tym K8, Pentium 4, Core 2)
+#   "v2"       — x86-64-v2  (Nehalem+, Bobcat+, Bulldozer+ i nowsze)
+#   "v3"       — x86-64-v3  (Haswell+, Excavator+, Zen/Zen+/Zen2/Zen3)
+#   "v4"       — x86-64-v4  (Zen4/Zen5, Skylake-X, Ice Lake, Tiger Lake, Sapphire Rapids+)
+#
+# Pełna lista CPU per poziom — patrz README.md
+# ============================================================
+cpu_level      = "v3"
+
+[gaming]
+# BORE scheduler (Burst-Oriented Response Enhancer) — płynność gier i desktopa
+bore_scheduler = true
+
+# sched_ext (BPF extensible scheduler) — zmiana schedulera w runtime
+sched_ext      = true
+
+# NTSYNC — kernel-level NT synchronization dla Wine/Proton (wymaga kernel >= 6.14)
+ntsync         = true
+
+# BBR v3 — kontrola przeciążenia TCP, niższa latencja sieciowa w grach
+bbr3           = true
+
+# Valve VRAM patch set — priorytet pamięci gier, mniej crashy przy pełnym VRAM
+valve_vram_patches = true
+
+# Pobieraj wbudowane patche (BORE, Valve VRAM) z GitHub automatycznie
+auto_fetch_patches = true
+
 [nvidia]
 # Czy dostosowywać konfigurację pod NVIDIA akmod
 enable         = true
 
-# Włącz CONFIG_MODULE_SIG=n (wymagane przez akmod bez Secure Boot)
+# Wyłącz podpisywanie modułów (wymagane przez akmod bez Secure Boot)
 disable_module_signing = true
 
-# Wymuś CONFIG_KALLSYMS_ALL=y (potrzebne przez niektóre wersje sterownika)
+# CONFIG_KALLSYMS_ALL=y (potrzebne przez niektóre wersje sterownika)
 kallsyms_all   = true
 
-# Wymuś CONFIG_DMABUF_HEAPS=y (NVIDIA GSP firmware)
+# CONFIG_DMABUF_HEAPS=y (NVIDIA GSP firmware)
 dmabuf_heaps   = true
 
 [github]
-# Token GitHub do tworzenia Release + uploadu assetów
-# USTAW przez zmienną środowiskową LEGENDARYOS_GITHUB_TOKEN zamiast tu —
-# wpis poniżej jest fallbackiem (zostaw pusty na repo publicznym!)
+# Token GitHub — ZAWSZE ustaw przez zmienną środowiskową LEGENDARYOS_GITHUB_TOKEN
+# Zostaw puste tutaj (bezpieczeństwo!)
 token          = ""
 
 # Właściciel i nazwa repozytorium
 owner          = "LegendaryOS-Linux-System"
 repo           = "LegendaryOS-Kernel"
 
-# Szablon URL pobierania (używany w specfile %Source0)
-# Zmienne {version} i {arch} są podstawiane automatycznie
-download_url   = "https://github.com/LegendaryOS-Linux-System/LegendaryOS-Kernel/releases/download/v{version}/legendaryos-kernel-{version}-{arch}.tar.xz"
+# Szablon URL pobierania
+download_url   = "https://github.com/LegendaryOS-Linux-System/LegendaryOS-Kernel/releases/download/v{version}/legendaryos-kernel-{version}-{arch}.rpm"
