@@ -3,136 +3,85 @@
 require "fileutils"
 require_relative "utils"
 
-# Kompiluje jądro (bzImage + modules) z obsługą GCC i Clang/LTO.
-# Instaluje do katalogu staging używanego przez RpmPackager.
-class KernelBuilder
+# Pobiera tarball źródeł Linuxa z kernel.org i weryfikuje podpis SHA256.
+class KernelFetcher
   class Error < StandardError; end
 
+  KERNEL_ORG_BASE = "https://cdn.kernel.org/pub/linux/kernel"
+
   def initialize(cfg, log)
-    @cfg     = cfg
-    @log     = log
-    @src     = cfg.source_dir
-    @staging = File.join(cfg.build_dir, "staging")
+    @cfg = cfg
+    @log = log
   end
 
-  def build
-    raise Error, "Katalog źródeł nie istnieje: #{@src}" unless Dir.exist?(@src)
+  def fetch
+    FileUtils.mkdir_p(@cfg.build_dir)
 
-    check_dependencies
-    compile_kernel
-    compile_modules
-    install_to_staging
+    tarball   = tarball_path
+    sha256url = "#{remote_base}/sha256sums.asc"
+
+    if File.exist?(tarball) && !@cfg.clean_build?
+      @log.info "Tarball już istnieje, pomijam pobieranie: #{tarball}"
+    else
+      download_tarball(tarball)
+    end
+
+    verify_checksum(tarball, sha256url)
+    extract(tarball)
   end
-
-  def staging_dir = @staging
 
   private
 
-  # ===========================================================================
-  # Sprawdzenie narzędzi
-  # ===========================================================================
-  GCC_TOOLS   = %w[make gcc ld as strip bc flex bison openssl pahole].freeze
-  CLANG_TOOLS = %w[make clang lld llvm-strip bc flex bison openssl pahole].freeze
+  def version_major
+    @cfg.kernel_version.split(".").first
+  end
 
-  def check_dependencies
-    tools = @cfg.compiler == "clang" ? CLANG_TOOLS : GCC_TOOLS
-    missing = tools.reject { |t| Utils.command_exist?(t) }
+  def remote_base
+    "#{KERNEL_ORG_BASE}/v#{version_major}.x"
+  end
 
-    unless missing.empty?
-      pkg_hint = missing.map { |t|
-        { "pahole" => "dwarves", "openssl" => "openssl-devel" }.fetch(t, t)
-      }.join(" ")
-      raise Error, "Brakujące narzędzia: #{missing.join(', ')}\n" \
-                   "Zainstaluj: sudo dnf install #{pkg_hint}"
+  def tarball_name
+    "linux-#{@cfg.kernel_version}.tar.xz"
+  end
+
+  def tarball_path
+    File.join(@cfg.build_dir, tarball_name)
+  end
+
+  def download_tarball(dest)
+    url = "#{remote_base}/#{tarball_name}"
+    @log.info "Pobieranie: #{url}"
+    Utils.run!("curl -L --progress-bar -o #{dest.shellescape} #{url.shellescape}", @log)
+  end
+
+  def verify_checksum(tarball, sha256url)
+    @log.info "Weryfikacja SHA-256..."
+    sha_file = File.join(@cfg.build_dir, "sha256sums.asc")
+    Utils.run!("curl -L -s -o #{sha_file.shellescape} #{sha256url.shellescape}", @log)
+
+    expected = File.readlines(sha_file)
+                   .map(&:strip)
+                   .find { |l| l.end_with?(tarball_name) }
+                   &.split&.first
+
+    raise Error, "Nie znaleziono sumy kontrolnej dla #{tarball_name}" unless expected
+
+    actual = `sha256sum #{tarball.shellescape}`.split.first.strip
+    raise Error, "SHA-256 nie zgadza się!\n  oczekiwano: #{expected}\n  otrzymano:  #{actual}" unless actual == expected
+
+    @log.info "SHA-256 OK: #{actual}"
+  end
+
+  def extract(tarball)
+    dest = @cfg.source_dir
+    if Dir.exist?(dest) && !@cfg.clean_build?
+      @log.info "Katalog źródeł już istnieje: #{dest}"
+      return
     end
 
-    @log.info "Wszystkie narzędzia dostępne (#{@cfg.compiler})."
-  end
-
-  # ===========================================================================
-  # Flagi kompilatora
-  # ===========================================================================
-  def compiler_flags
-    case @cfg.compiler
-    when "clang"
-      flags  = "CC=clang CXX=clang++ LD=ld.lld AR=llvm-ar NM=llvm-nm "
-      flags += "STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump "
-      flags += "LLVM=1 LLVM_IAS=1 "
-      flags += "KCFLAGS=\"#{@cfg.cpu_march_flag}\" "
-      flags
-    else
-      # GCC — flagi CPU wstrzyknięte do Makefile przez KernelConfigurator
-      ""
-    end
-  end
-
-  # ===========================================================================
-  # make helper
-  # ===========================================================================
-  def make_cmd(target, extra = "")
-    "make -C #{@src.shellescape} #{target} " \
-      "-j#{@cfg.jobs} " \
-      "ARCH=#{@cfg.arch.shellescape} " \
-      "#{compiler_flags} " \
-      "#{extra}".strip
-  end
-
-  # ===========================================================================
-  # Kompilacja
-  # ===========================================================================
-  def compile_kernel
-    @log.info "Kompilacja bzImage — #{@cfg.jobs} wątków / #{@cfg.compiler} / CPU #{@cfg.cpu_level}..."
-    Utils.run!(make_cmd("bzImage"), @log)
-    @log.info "bzImage gotowy."
-  end
-
-  def compile_modules
-    @log.info "Kompilacja modułów..."
-    Utils.run!(make_cmd("modules"), @log)
-    @log.info "Moduły gotowe."
-  end
-
-  # ===========================================================================
-  # Instalacja do staging
-  # ===========================================================================
-  def install_to_staging
-    @log.info "Instalacja do staging: #{@staging}"
-    FileUtils.rm_rf(@staging)
-    FileUtils.mkdir_p(["#{@staging}/boot", "#{@staging}/lib/modules"])
-
-    # Moduły
-    Utils.run!(
-      make_cmd("modules_install", "INSTALL_MOD_PATH=#{@staging.shellescape}"),
-      @log
-    )
-
-    # bzImage → vmlinuz
-    bzimage = File.join(@src, "arch", arch_subdir, "boot", "bzImage")
-    raise Error, "bzImage nie znaleziony: #{bzimage}" unless File.exist?(bzimage)
-    FileUtils.cp(bzimage, "#{@staging}/boot/vmlinuz-#{@cfg.full_version}")
-
-    # System.map
-    sysmap = File.join(@src, "System.map")
-    FileUtils.cp(sysmap, "#{@staging}/boot/System.map-#{@cfg.full_version}") if File.exist?(sysmap)
-
-    # .config
-    FileUtils.cp(File.join(@src, ".config"), "#{@staging}/boot/config-#{@cfg.full_version}")
-
-    # Usuń linki symlink do build/source (nie potrzebne w RPM, zajmują miejsce)
-    mod_dir = "#{@staging}/lib/modules/#{@cfg.full_version}"
-    ["build", "source"].each do |link|
-      path = "#{mod_dir}/#{link}"
-      File.unlink(path) if File.symlink?(path)
-    end
-
-    @log.info "Staging gotowy: #{@staging}"
-  end
-
-  def arch_subdir
-    case @cfg.arch
-    when "x86_64"  then "x86"
-    when "aarch64" then "arm64"
-    else @cfg.arch
-    end
+    @log.info "Rozpakowywanie #{tarball} → #{@cfg.build_dir}"
+    FileUtils.rm_rf(dest)
+    Utils.run!("tar -xf #{tarball.shellescape} -C #{@cfg.build_dir.shellescape}", @log)
+    @log.info "Źródła gotowe: #{dest}"
   end
 end
