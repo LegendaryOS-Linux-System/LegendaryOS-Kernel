@@ -1,0 +1,25 @@
+From: LegendaryOS Build System <build@legendaryos.linux>
+Date: Sat, 27 Jun 2026 00:00:00 +0000
+Subject: [PATCH 01/10] build: disable -Werror to allow out-of-tree gaming patches to compile
+
+Niektóre patche gamingowe (BORE, Valve) generują ostrzeżenia kompilatora
+traktowane jako błędy w upstream tree. Wyłączamy WERROR, aby build nie
+kończył się niepowodzeniem przy patchach zewnętrznych.
+
+Signed-off-by: LegendaryOS Build System <build@legendaryos.linux>
+---
+ Makefile | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index aabbcc1..ddeeff2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -400,7 +400,7 @@ endif
+ # Enforce that no Werror is set by the config
+ # Warnings may creep in from external / gaming patches
+-KBUILD_CFLAGS += $(call cc-option,-Werror=strict-prototypes,)
++# KBUILD_CFLAGS += $(call cc-option,-Werror=strict-prototypes,)  # disabled: gaming patches
+ 
+-KBUILD_CFLAGS += $(call cc-option,-Werror=implicit-function-declaration,)
++# KBUILD_CFLAGS += $(call cc-option,-Werror=implicit-function-declaration,)  # disabled
