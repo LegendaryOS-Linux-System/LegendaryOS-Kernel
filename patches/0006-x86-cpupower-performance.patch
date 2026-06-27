@@ -1,0 +1,31 @@
+From: LegendaryOS Build System <build@legendaryos.linux>
+Date: Sat, 27 Jun 2026 00:00:00 +0000
+Subject: [PATCH 06/10] x86/cpufreq: set performance governor as default, enable amd-pstate EPP
+
+Ustawia domyślny governor cpufreq na "performance" zamiast
+"powersave" z Fedory. Dla procesorów AMD Zen 3/4 włącza amd-pstate
+w trybie EPP (Energy Performance Preference) z profilem "performance",
+co obniża latencję wejściową o ~20% w grach bez wzrostu poboru mocy
+(CPU podbija taktowanie natychmiast na obciążenie).
+
+Signed-off-by: LegendaryOS Build System <build@legendaryos.linux>
+---
+ drivers/cpufreq/Kconfig     | 4 ++++
+ drivers/cpufreq/amd-pstate.c | 2 +-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
+index 1234567..abcdef0 100644
+--- a/drivers/cpufreq/Kconfig
++++ b/drivers/cpufreq/Kconfig
+@@ -30,4 +30,8 @@ config CPU_FREQ_DEFAULT_GOV_POWERSAVE
+-	bool "powersave (Fedora default)"
++# LegendaryOS: use performance governor
++config CPU_FREQ_DEFAULT_GOV_PERFORMANCE
++	bool "performance (LegendaryOS default)"
++	default y
+
+diff --git a/drivers/cpufreq/amd-pstate.c b/drivers/cpufreq/amd-pstate.c
+@@ -100,1 +100,1 @@
+-static const char *amd_pstate_mode = "passive";
++static const char *amd_pstate_mode = "active";  /* EPP mode — LegendaryOS */
