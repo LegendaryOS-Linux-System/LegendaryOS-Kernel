@@ -1,0 +1,206 @@
+# =============================================================================
+#  LegendaryOS Kernel — GitHub Actions
+#  Buduje jądro Linuxa ze źródeł i pakuje do .rpm
+#  RPM trafia jako artefakt Actions — release robisz sam ręcznie.
+# =============================================================================
+
+name: Build LegendaryOS Kernel RPM
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "Wersja kernela (np. 7.1). Puste = z config.toml"
+        required: false
+        default: ""
+      cpu_level:
+        description: "Poziom CPU: generic | v2 | v3 | v4"
+        required: false
+        default: "v3"
+
+# Anuluj poprzedni run jeśli odpalisz nowy przed końcem starego
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LEGENDARYOS_CPU_LEVEL: ${{ inputs.cpu_level || 'v3' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1: Walidacja config i patchy — szybki check przed ciężkim buildem
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate config & patches
+    runs-on: ubuntu-24.04
+    outputs:
+      kernel_version: ${{ steps.get-version.outputs.version }}
+
+    steps:
+      - name: Checkout repozytorium
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Pobierz wersję kernela
+        id: get-version
+        run: |
+          if [ -n "${{ inputs.kernel_version }}" ]; then
+            VERSION="${{ inputs.kernel_version }}"
+          else
+            VERSION=$(ruby -e "require 'toml-rb'; c = TomlRB.load_file('config.toml'); puts c['kernel']['version']" 2>/dev/null \
+                      || grep -E '^version\s*=' config.toml | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Kernel version: ${VERSION}"
+
+      - name: Waliduj config.toml
+        run: |
+          ruby -e "
+            require 'toml-rb'
+            cfg = TomlRB.load_file('config.toml')
+            abort 'Brak [kernel].version'   unless cfg.dig('kernel','version')
+            abort 'Brak [build].output_dir' unless cfg.dig('build','output_dir')
+            puts 'config.toml OK'
+          "
+
+      - name: Sprawdź patche
+        run: |
+          PATCH_COUNT=$(find patches/ -name '*.patch' | wc -l)
+          echo "Znaleziono ${PATCH_COUNT} patchy:"
+          find patches/ -name '*.patch' | sort | while read -r p; do
+            echo "  → $p"
+            [ -s "$p" ] || { echo "BŁĄD: Pusty plik: $p"; exit 1; }
+          done
+          echo "Walidacja patchy OK"
+
+  # ---------------------------------------------------------------------------
+  # JOB 2: Build kernela + pakowanie RPM
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build kernel ${{ needs.validate.outputs.kernel_version }} → RPM
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repozytorium
+        uses: actions/checkout@v4
+
+      - name: Zainstaluj zależności buildowe
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ make bc flex bison \
+            libssl-dev libelf-dev dwarves pahole \
+            rpm rpmbuild \
+            curl xz-utils tar \
+            libncurses-dev \
+            ccache zstd lz4 cpio
+          gcc --version
+          make --version
+          rpmbuild --version
+
+      - name: Zainstaluj Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-kernel-${{ needs.validate.outputs.kernel_version }}-${{ runner.arch }}-${{ hashFiles('config.toml') }}
+          restore-keys: |
+            ccache-kernel-${{ needs.validate.outputs.kernel_version }}-${{ runner.arch }}-
+            ccache-kernel-
+
+      - name: Konfiguruj ccache
+        run: |
+          ccache --max-size=10G
+          ccache --zero-stats
+          echo "CCACHE_DIR=${HOME}/.ccache" >> "$GITHUB_ENV"
+          echo "PATH=/usr/lib/ccache:${PATH}" >> "$GITHUB_ENV"
+
+      - name: Cache tarball źródeł kernela
+        uses: actions/cache@v4
+        with:
+          path: /tmp/legendaryos-kernel-build/linux-${{ needs.validate.outputs.kernel_version }}.tar.xz
+          key: kernel-src-${{ needs.validate.outputs.kernel_version }}
+
+      - name: Ustaw poziom CPU w config.toml
+        if: inputs.cpu_level != ''
+        run: |
+          sed -i "s/^cpu_level\s*=.*/cpu_level = \"${{ env.LEGENDARYOS_CPU_LEVEL }}\"/" config.toml
+          echo "cpu_level: ${{ env.LEGENDARYOS_CPU_LEVEL }}"
+
+      - name: Ustaw wersję kernela (override)
+        if: inputs.kernel_version != ''
+        run: |
+          sed -i "s/^version\s*=.*/version = \"${{ inputs.kernel_version }}\"/" config.toml
+          echo "Wersja kernela: ${{ inputs.kernel_version }}"
+
+      - name: Buduj kernel + pakuj RPM
+        run: |
+          echo "=== LegendaryOS Kernel Build ==="
+          echo "Kernel:    ${{ needs.validate.outputs.kernel_version }}"
+          echo "CPU level: ${{ env.LEGENDARYOS_CPU_LEVEL }}"
+          echo "Runner:    $(uname -r) / $(nproc) vCPU / $(free -h | grep Mem | awk '{print $2}') RAM"
+          echo "================================"
+          bundle exec ruby build.rb
+
+      - name: Statystyki ccache
+        if: always()
+        run: ccache --show-stats
+
+      - name: Weryfikuj wygenerowane RPM
+        run: |
+          echo "=== Wygenerowane pliki RPM ==="
+          find output/ -name "*.rpm" | sort | tee /tmp/rpm-list.txt
+          [ -s /tmp/rpm-list.txt ] || { echo "BŁĄD: Brak plików .rpm!"; exit 1; }
+          while read -r rpm; do
+            echo ""
+            echo "--- $rpm ---"
+            rpm -qip "$rpm" || true
+          done < /tmp/rpm-list.txt
+
+      - name: Upload RPM jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: legendaryos-kernel-${{ needs.validate.outputs.kernel_version }}-rpm
+          path: output/**/*.rpm
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload logów buildu (tylko przy błędzie)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ needs.validate.outputs.kernel_version }}
+          path: |
+            /tmp/legendaryos-kernel-build/**/*.log
+            /tmp/legendaryos-kernel-build/**/build.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Podsumowanie
+        run: |
+          echo "## LegendaryOS Kernel ${{ needs.validate.outputs.kernel_version }} — Build zakończony" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parametr | Wartość |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Wersja kernela | \`${{ needs.validate.outputs.kernel_version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CPU target | \`x86-64-${{ env.LEGENDARYOS_CPU_LEVEL }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runner | \`ubuntu-24.04\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Pliki RPM (pobierz z zakładki Artifacts)" >> "$GITHUB_STEP_SUMMARY"
+          find output/ -name "*.rpm" | while read -r f; do
+            SIZE=$(du -sh "$f" | cut -f1)
+            echo "- \`$(basename "$f")\` (${SIZE})" >> "$GITHUB_STEP_SUMMARY"
+          done
+  
