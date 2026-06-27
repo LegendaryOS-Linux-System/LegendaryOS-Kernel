@@ -36,14 +36,11 @@ jobs:
       - name: Checkout repozytorium
         uses: actions/checkout@v4
 
-      - name: Zainstaluj Ruby
+      - name: Zainstaluj Ruby + gemy (Gemfile)
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
-
-      - name: Zainstaluj gem toml-rb
-        run: gem install toml-rb --no-document
 
       - name: Pobierz wersję kernela z config.toml (lub override)
         id: get-version
@@ -51,8 +48,7 @@ jobs:
           if [ -n "${{ inputs.kernel_version }}" ]; then
             VERSION="${{ inputs.kernel_version }}"
           else
-            # Parsuj TOML przez Ruby z zainstalowanym gemem
-            VERSION=$(ruby -e "require 'toml-rb'; puts TomlRB.load_file('config.toml').dig('kernel','version')")
+            VERSION=$(bundle exec ruby -e "require 'toml-rb'; puts TomlRB.load_file('config.toml').dig('kernel','version')")
           fi
           [ -n "$VERSION" ] || { echo "BŁĄD: Nie udało się odczytać wersji kernela"; exit 1; }
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -60,7 +56,7 @@ jobs:
 
       - name: Waliduj config.toml
         run: |
-          ruby -e "
+          bundle exec ruby -e "
             require 'toml-rb'
             cfg = TomlRB.load_file('config.toml')
             abort 'Brak [kernel].version'   unless cfg.dig('kernel','version')
@@ -81,11 +77,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # JOB 2: Build — matrix (v2 / v3 / v4) — trzy równoległe joby
-  #
-  #  Każdy job:
-  #    • nadpisuje cpu_level w config.toml
-  #    • buduje pełny kernel + pakuje RPM z sufiksem .cpu_vN w nazwie
-  #    • uploaduje artefakt osobno per poziom CPU
   # ---------------------------------------------------------------------------
   build:
     name: "Build kernel ${{ needs.validate.outputs.kernel_version }} [x86-64-${{ matrix.cpu }}]"
@@ -94,7 +85,7 @@ jobs:
     timeout-minutes: 360
 
     strategy:
-      fail-fast: false   # jeden nieudany build nie anuluje pozostałych
+      fail-fast: false
       matrix:
         cpu: [v2, v3, v4]
 
@@ -116,16 +107,13 @@ jobs:
           make --version
           rpmbuild --version
 
-      - name: Zainstaluj Ruby
+      - name: Zainstaluj Ruby + gemy (Gemfile)
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
           bundler-cache: true
 
-      - name: Zainstaluj gem toml-rb
-        run: gem install toml-rb --no-document
-
-      # Cache ccache per poziom CPU — kompilacje różnią się flagami -march
+      # Cache ccache osobny per poziom CPU — różne flagi -march
       - name: Cache ccache [${{ matrix.cpu }}]
         uses: actions/cache@v4
         with:
@@ -142,7 +130,7 @@ jobs:
           echo "CCACHE_DIR=${HOME}/.ccache" >> "$GITHUB_ENV"
           echo "PATH=/usr/lib/ccache:${PATH}" >> "$GITHUB_ENV"
 
-      # Tarball źródeł jest wspólny dla wszystkich poziomów CPU — jeden cache
+      # Tarball źródeł wspólny dla wszystkich poziomów CPU
       - name: Cache tarball źródeł kernela
         uses: actions/cache@v4
         with:
@@ -155,19 +143,16 @@ jobs:
           sed -i "s/^version\s*=.*/version = \"${{ inputs.kernel_version }}\"/" config.toml
           echo "Wersja kernela: ${{ inputs.kernel_version }}"
 
-      # Kluczowy krok: nadpisz cpu_level na wartość z matrix
-      - name: Ustaw cpu_level = ${{ matrix.cpu }} w config.toml
+      - name: Ustaw cpu_level = ${{ matrix.cpu }}
         run: |
           sed -i "s/^cpu_level\s*=.*/cpu_level = \"${{ matrix.cpu }}\"/" config.toml
           echo "cpu_level ustawiony na: ${{ matrix.cpu }}"
           grep cpu_level config.toml
 
-      # Każdy build trafia do osobnego output_dir żeby nie mieszać RPM
-      - name: Ustaw output_dir per poziom CPU
+      - name: Ustaw output_dir dla poziomu ${{ matrix.cpu }}
         run: |
           sed -i "s|^output_dir\s*=.*|output_dir = \"./output/${{ matrix.cpu }}\"|" config.toml
           mkdir -p "output/${{ matrix.cpu }}"
-          echo "output_dir ustawiony na: ./output/${{ matrix.cpu }}"
 
       - name: "Buduj kernel + pakuj RPM [x86-64-${{ matrix.cpu }}]"
         run: |
@@ -213,10 +198,11 @@ jobs:
           if-no-files-found: ignore
 
       - name: "Podsumowanie [${{ matrix.cpu }}]"
+        if: always()
         run: |
           KV="${{ needs.validate.outputs.kernel_version }}"
           CPU="${{ matrix.cpu }}"
-          echo "## x86-64-${CPU}: LegendaryOS Kernel ${KV} — Build zakończony" >> "$GITHUB_STEP_SUMMARY"
+          echo "## x86-64-${CPU}: LegendaryOS Kernel ${KV}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Parametr | Wartość |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
@@ -224,7 +210,7 @@ jobs:
           echo "| CPU target | \`x86-64-${CPU}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Runner | \`ubuntu-24.04\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Pliki RPM (pobierz z zakładki Artifacts)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Pliki RPM (zakładka Artifacts)" >> "$GITHUB_STEP_SUMMARY"
           find "output/${CPU}" -name "*.rpm" 2>/dev/null | while read -r f; do
             SIZE=$(du -sh "$f" | cut -f1)
             echo "- \`$(basename "$f")\` (${SIZE})" >> "$GITHUB_STEP_SUMMARY"
