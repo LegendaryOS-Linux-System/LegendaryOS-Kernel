@@ -1,0 +1,24 @@
+From: LegendaryOS Build System <build@legendaryos.linux>
+Date: Sat, 27 Jun 2026 00:00:00 +0000
+Subject: [PATCH 03/10] mm: enable Multi-Gen LRU and enable it by default at boot
+
+Multi-Gen LRU (MGLRU) poprawia zarządzanie pamięcią przy dużym obciążeniu
+typowym dla gier (wiele wielkich allokacji, częste zmiany working-set).
+Patch włącza MGLRU i ustawia lru_gen.enabled=1 jako domyślne.
+
+Signed-off-by: LegendaryOS Build System <build@legendaryos.linux>
+---
+ mm/Kconfig | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/mm/Kconfig b/mm/Kconfig
+index aaaaaaa..bbbbbbb 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -100,3 +100,7 @@ config ZSWAP
+ 	  Compressed swap cache to reduce I/O pressure under memory load.
+ 
++config LRU_GEN
++	bool "Multi-Gen LRU (LegendaryOS default: enabled)"
++	default y
++	select LRU_GEN_ENABLED
