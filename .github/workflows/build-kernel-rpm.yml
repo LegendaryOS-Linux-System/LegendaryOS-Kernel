@@ -1,6 +1,9 @@
 # =============================================================================
 #  LegendaryOS Kernel — GitHub Actions
-#  Buduje jądro Linuxa ze źródeł i pakuje do .rpm
+#  Buduje jądro ze źródeł i pakuje do .rpm
+#
+#  Strategia CPU: matrix build — trzy równoległe joby (v2 / v3 / v4)
+#  Każdy produkuje osobny RPM zoptymalizowany pod swój poziom x86-64.
 #  RPM trafia jako artefakt Actions — release robisz sam ręcznie.
 # =============================================================================
 
@@ -13,22 +16,15 @@ on:
         description: "Wersja kernela (np. 7.1). Puste = z config.toml"
         required: false
         default: ""
-      cpu_level:
-        description: "Poziom CPU: generic | v2 | v3 | v4"
-        required: false
-        default: "v3"
 
 # Anuluj poprzedni run jeśli odpalisz nowy przed końcem starego
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  LEGENDARYOS_CPU_LEVEL: ${{ inputs.cpu_level || 'v3' }}
-
 jobs:
   # ---------------------------------------------------------------------------
-  # JOB 1: Walidacja config i patchy — szybki check przed ciężkim buildem
+  # JOB 1: Walidacja config i patchy — jeden raz, przed budowaniem
   # ---------------------------------------------------------------------------
   validate:
     name: Validate config & patches
@@ -46,15 +42,19 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
 
-      - name: Pobierz wersję kernela
+      - name: Zainstaluj gem toml-rb
+        run: gem install toml-rb --no-document
+
+      - name: Pobierz wersję kernela z config.toml (lub override)
         id: get-version
         run: |
           if [ -n "${{ inputs.kernel_version }}" ]; then
             VERSION="${{ inputs.kernel_version }}"
           else
-            VERSION=$(ruby -e "require 'toml-rb'; c = TomlRB.load_file('config.toml'); puts c['kernel']['version']" 2>/dev/null \
-                      || grep -E '^version\s*=' config.toml | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')
+            # Parsuj TOML przez Ruby z zainstalowanym gemem
+            VERSION=$(ruby -e "require 'toml-rb'; puts TomlRB.load_file('config.toml').dig('kernel','version')")
           fi
+          [ -n "$VERSION" ] || { echo "BŁĄD: Nie udało się odczytać wersji kernela"; exit 1; }
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Kernel version: ${VERSION}"
 
@@ -65,6 +65,7 @@ jobs:
             cfg = TomlRB.load_file('config.toml')
             abort 'Brak [kernel].version'   unless cfg.dig('kernel','version')
             abort 'Brak [build].output_dir' unless cfg.dig('build','output_dir')
+            abort 'Brak [github].owner'     unless cfg.dig('github','owner')
             puts 'config.toml OK'
           "
 
@@ -79,13 +80,23 @@ jobs:
           echo "Walidacja patchy OK"
 
   # ---------------------------------------------------------------------------
-  # JOB 2: Build kernela + pakowanie RPM
+  # JOB 2: Build — matrix (v2 / v3 / v4) — trzy równoległe joby
+  #
+  #  Każdy job:
+  #    • nadpisuje cpu_level w config.toml
+  #    • buduje pełny kernel + pakuje RPM z sufiksem .cpu_vN w nazwie
+  #    • uploaduje artefakt osobno per poziom CPU
   # ---------------------------------------------------------------------------
   build:
-    name: Build kernel ${{ needs.validate.outputs.kernel_version }} → RPM
+    name: "Build kernel ${{ needs.validate.outputs.kernel_version }} [x86-64-${{ matrix.cpu }}]"
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+
+    strategy:
+      fail-fast: false   # jeden nieudany build nie anuluje pozostałych
+      matrix:
+        cpu: [v2, v3, v4]
 
     steps:
       - name: Checkout repozytorium
@@ -111,14 +122,18 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
 
-      - name: Cache ccache
+      - name: Zainstaluj gem toml-rb
+        run: gem install toml-rb --no-document
+
+      # Cache ccache per poziom CPU — kompilacje różnią się flagami -march
+      - name: Cache ccache [${{ matrix.cpu }}]
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-kernel-${{ needs.validate.outputs.kernel_version }}-${{ runner.arch }}-${{ hashFiles('config.toml') }}
+          key: ccache-kernel-${{ needs.validate.outputs.kernel_version }}-${{ matrix.cpu }}-${{ hashFiles('config.toml') }}
           restore-keys: |
-            ccache-kernel-${{ needs.validate.outputs.kernel_version }}-${{ runner.arch }}-
-            ccache-kernel-
+            ccache-kernel-${{ needs.validate.outputs.kernel_version }}-${{ matrix.cpu }}-
+            ccache-kernel-${{ matrix.cpu }}-
 
       - name: Konfiguruj ccache
         run: |
@@ -127,41 +142,50 @@ jobs:
           echo "CCACHE_DIR=${HOME}/.ccache" >> "$GITHUB_ENV"
           echo "PATH=/usr/lib/ccache:${PATH}" >> "$GITHUB_ENV"
 
+      # Tarball źródeł jest wspólny dla wszystkich poziomów CPU — jeden cache
       - name: Cache tarball źródeł kernela
         uses: actions/cache@v4
         with:
           path: /tmp/legendaryos-kernel-build/linux-${{ needs.validate.outputs.kernel_version }}.tar.xz
           key: kernel-src-${{ needs.validate.outputs.kernel_version }}
 
-      - name: Ustaw poziom CPU w config.toml
-        if: inputs.cpu_level != ''
-        run: |
-          sed -i "s/^cpu_level\s*=.*/cpu_level = \"${{ env.LEGENDARYOS_CPU_LEVEL }}\"/" config.toml
-          echo "cpu_level: ${{ env.LEGENDARYOS_CPU_LEVEL }}"
-
-      - name: Ustaw wersję kernela (override)
+      - name: Ustaw wersję kernela w config.toml (override)
         if: inputs.kernel_version != ''
         run: |
           sed -i "s/^version\s*=.*/version = \"${{ inputs.kernel_version }}\"/" config.toml
           echo "Wersja kernela: ${{ inputs.kernel_version }}"
 
-      - name: Buduj kernel + pakuj RPM
+      # Kluczowy krok: nadpisz cpu_level na wartość z matrix
+      - name: Ustaw cpu_level = ${{ matrix.cpu }} w config.toml
+        run: |
+          sed -i "s/^cpu_level\s*=.*/cpu_level = \"${{ matrix.cpu }}\"/" config.toml
+          echo "cpu_level ustawiony na: ${{ matrix.cpu }}"
+          grep cpu_level config.toml
+
+      # Każdy build trafia do osobnego output_dir żeby nie mieszać RPM
+      - name: Ustaw output_dir per poziom CPU
+        run: |
+          sed -i "s|^output_dir\s*=.*|output_dir = \"./output/${{ matrix.cpu }}\"|" config.toml
+          mkdir -p "output/${{ matrix.cpu }}"
+          echo "output_dir ustawiony na: ./output/${{ matrix.cpu }}"
+
+      - name: "Buduj kernel + pakuj RPM [x86-64-${{ matrix.cpu }}]"
         run: |
           echo "=== LegendaryOS Kernel Build ==="
           echo "Kernel:    ${{ needs.validate.outputs.kernel_version }}"
-          echo "CPU level: ${{ env.LEGENDARYOS_CPU_LEVEL }}"
+          echo "CPU level: x86-64-${{ matrix.cpu }}"
           echo "Runner:    $(uname -r) / $(nproc) vCPU / $(free -h | grep Mem | awk '{print $2}') RAM"
           echo "================================"
           bundle exec ruby build.rb
 
-      - name: Statystyki ccache
+      - name: Statystyki ccache [${{ matrix.cpu }}]
         if: always()
         run: ccache --show-stats
 
-      - name: Weryfikuj wygenerowane RPM
+      - name: Weryfikuj wygenerowane RPM [${{ matrix.cpu }}]
         run: |
-          echo "=== Wygenerowane pliki RPM ==="
-          find output/ -name "*.rpm" | sort | tee /tmp/rpm-list.txt
+          echo "=== RPM dla x86-64-${{ matrix.cpu }} ==="
+          find "output/${{ matrix.cpu }}" -name "*.rpm" | sort | tee /tmp/rpm-list.txt
           [ -s /tmp/rpm-list.txt ] || { echo "BŁĄD: Brak plików .rpm!"; exit 1; }
           while read -r rpm; do
             echo ""
@@ -169,11 +193,11 @@ jobs:
             rpm -qip "$rpm" || true
           done < /tmp/rpm-list.txt
 
-      - name: Upload RPM jako artefakt
+      - name: "Upload RPM [x86-64-${{ matrix.cpu }}]"
         uses: actions/upload-artifact@v4
         with:
-          name: legendaryos-kernel-${{ needs.validate.outputs.kernel_version }}-rpm
-          path: output/**/*.rpm
+          name: "legendaryos-kernel-${{ needs.validate.outputs.kernel_version }}-x86-64-${{ matrix.cpu }}"
+          path: "output/${{ matrix.cpu }}/**/*.rpm"
           retention-days: 30
           if-no-files-found: error
 
@@ -181,26 +205,27 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs-${{ needs.validate.outputs.kernel_version }}
+          name: "build-logs-${{ needs.validate.outputs.kernel_version }}-${{ matrix.cpu }}"
           path: |
             /tmp/legendaryos-kernel-build/**/*.log
             /tmp/legendaryos-kernel-build/**/build.log
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Podsumowanie
+      - name: "Podsumowanie [${{ matrix.cpu }}]"
         run: |
-          echo "## LegendaryOS Kernel ${{ needs.validate.outputs.kernel_version }} — Build zakończony" >> "$GITHUB_STEP_SUMMARY"
+          KV="${{ needs.validate.outputs.kernel_version }}"
+          CPU="${{ matrix.cpu }}"
+          echo "## x86-64-${CPU}: LegendaryOS Kernel ${KV} — Build zakończony" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Parametr | Wartość |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Wersja kernela | \`${{ needs.validate.outputs.kernel_version }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CPU target | \`x86-64-${{ env.LEGENDARYOS_CPU_LEVEL }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Wersja kernela | \`${KV}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CPU target | \`x86-64-${CPU}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Runner | \`ubuntu-24.04\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Pliki RPM (pobierz z zakładki Artifacts)" >> "$GITHUB_STEP_SUMMARY"
-          find output/ -name "*.rpm" | while read -r f; do
+          find "output/${CPU}" -name "*.rpm" 2>/dev/null | while read -r f; do
             SIZE=$(du -sh "$f" | cut -f1)
             echo "- \`$(basename "$f")\` (${SIZE})" >> "$GITHUB_STEP_SUMMARY"
           done
-  
