@@ -1,0 +1,29 @@
+From: LegendaryOS Build System <build@legendaryos.linux>
+Date: Sat, 27 Jun 2026 00:00:00 +0000
+Subject: [PATCH 02/10] config: set HZ=1000 and PREEMPT_DYNAMIC for low-latency desktop
+
+Ustawia zegar systemowy na 1000 Hz oraz włącza pełną wywłaszczalność
+(PREEMPT_DYNAMIC) zamiast domyślnego PREEMPT_VOLUNTARY z Fedory.
+Krytyczne dla responsywności desktopa i płynności gier.
+
+Signed-off-by: LegendaryOS Build System <build@legendaryos.linux>
+---
+ kernel/Kconfig.hz | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/Kconfig.hz b/kernel/Kconfig.hz
+index 1111111..2222222 100644
+--- a/kernel/Kconfig.hz
++++ b/kernel/Kconfig.hz
+@@ -1,6 +1,6 @@
+-config HZ_250
+-	default y
+-	bool "250 HZ (Fedora default)"
++config HZ_1000
++	default y
++	bool "1000 HZ (LegendaryOS — low latency)"
+ 
+-# CONFIG_PREEMPT_VOLUNTARY is not set
+-# CONFIG_PREEMPT is not set
++CONFIG_PREEMPT_DYNAMIC=y
++CONFIG_PREEMPT=y
