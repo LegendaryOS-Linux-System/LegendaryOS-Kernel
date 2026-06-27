@@ -1,3 +1,7 @@
 *.toml linguist-detectable=true
 *.toml linguist-documentation=false
 *.toml linguist-language=TOML
+
+*.yml linguist-detectable=true
+*.yml linguist-documentation=false
+*.yml linguist-language=YAML
