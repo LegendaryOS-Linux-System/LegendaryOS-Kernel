@@ -1,0 +1,24 @@
+From: LegendaryOS Build System <build@legendaryos.linux>
+Date: Sat, 27 Jun 2026 00:00:00 +0000
+Subject: [PATCH 08/10] watchdog: disable NMI watchdog by default to reduce latency spikes
+
+NMI watchdog co sekundę przerywa wszystkie rdzenie przez Non-Maskable
+Interrupt w celu wykrycia kernel lockup. Powoduje to latency spikes
+w okolicach 1 ms widoczne w grach jako mikro-stuttery (szczególnie
+przy wysokich FPS: 165+ Hz, 240 Hz).
+
+Patch wyłącza NMI watchdog jako domyślne ustawienie. Można go
+przywrócić parametrem boot: nmi_watchdog=1.
+
+Signed-off-by: LegendaryOS Build System <build@legendaryos.linux>
+---
+ kernel/watchdog.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/watchdog.c b/kernel/watchdog.c
+index 1234567..7654321 100644
+--- a/kernel/watchdog.c
++++ b/kernel/watchdog.c
+@@ -44,1 +44,1 @@
+-unsigned int __read_mostly watchdog_enabled = SOFT_WATCHDOG_ENABLED | NMI_WATCHDOG_ENABLED;
++unsigned int __read_mostly watchdog_enabled = SOFT_WATCHDOG_ENABLED; /* LegendaryOS: NMI disabled */
