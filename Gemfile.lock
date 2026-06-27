@@ -2,8 +2,10 @@ GEM
   remote: https://rubygems.org/
   specs:
     citrus (3.0.2)
+    racc (1.8.1)
     toml-rb (4.2.0)
-      citrus (~> 3.0, >= 3.0.2)
+      citrus (> 3.0, ~> 3.0)
+      racc (~> 1.7)
 
 PLATFORMS
   x86_64-linux
