@@ -1,0 +1,58 @@
+From: LegendaryOS Build System <build@legendaryos.linux>
+Date: Sat, 27 Jun 2026 00:00:00 +0000
+Subject: [PATCH 09/10] block/ioprio: auto-elevate I/O priority for game processes via cgroup
+
+Patch dodaje logikę heurystyczną do blokowego schedulera I/O:
+procesy w cgroupie z atrybutem "gaming=1" (ustawianym przez gamemode/uresourced)
+automatycznie otrzymują ioprio klasy RT (Real-Time) z poziomem 4.
+
+Eliminuje stuttery spowodowane przez background I/O (systemd journal,
+dnf, tracker-miner) konkurujący z ładowaniem assetów gry ze SSD/NVMe.
+
+Działa z io.latency i io.bfq — domyślny scheduler dla LegendaryOS to BFQ.
+
+Signed-off-by: LegendaryOS Build System <build@legendaryos.linux>
+---
+ block/bfq-iosched.c | 18 ++++++++++++++++++
+ block/Kconfig        |  6 ++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
+index aaaaaaa..ccccccc 100644
+--- a/block/bfq-iosched.c
++++ b/block/bfq-iosched.c
+@@ -2100,6 +2100,24 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
++
++/*
++ * LegendaryOS gaming I/O heuristic:
++ * If the process cgroup has gaming=1 attribute set (via gamemode / uresourced),
++ * elevate its I/O priority to RT class automatically.
++ * This prevents asset-loading stutter during active gaming sessions.
++ */
++static void legendaryos_gaming_ioprio_boost(struct bfq_queue *bfqq,
++					    struct task_struct *tsk)
++{
++	struct cgroup_subsys_state *css;
++	struct kernfs_node *kn;
++
++	css = task_css(tsk, io_cgrp_id);
++	if (!css)
++		return;
++
++	kn = kernfs_find_and_get(css->cgroup->kn, "gaming");
++	if (kn) {
++		bfqq->ioprio_class = IOPRIO_CLASS_RT;
++		bfqq->ioprio       = 4;
++		kernfs_put(kn);
++	}
++}
+
+diff --git a/block/Kconfig b/block/Kconfig
+@@ -88,3 +88,9 @@ config IOSCHED_BFQ
++config LEGENDARYOS_GAMING_IOPRIO
++	bool "Auto-elevate I/O priority for gaming cgroups (LegendaryOS)"
++	depends on IOSCHED_BFQ
++	default y
++	help
++	  Automatically sets RT ioprio for processes in cgroups with gaming=1.
++	  Set by gamemode or uresourced. Reduces asset-loading stutter.
