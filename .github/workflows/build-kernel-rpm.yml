@@ -13,10 +13,21 @@ on:
         description: "Wersja kernela (np. 7.1). Puste = z config.toml"
         required: false
         default: ""
+      arch:
+        description: "Architektura docelowa"
+        required: false
+        default: "x86_64"
+        type: choice
+        options:
+          - x86_64
+          - aarch64
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  TARGET_ARCH: ${{ inputs.arch || 'x86_64' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -101,6 +112,21 @@ jobs:
           make --version | head -1
           rpmbuild --version
 
+      - name: Zainstaluj cross-compiler dla aarch64
+        if: env.TARGET_ARCH == 'aarch64'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libssl-dev:arm64 2>/dev/null || \
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc --version | head -1
+          echo "Cross-compiler aarch64 gotowy"
+
       - name: Zainstaluj Ruby + gemy
         uses: ruby/setup-ruby@v1
         with:
@@ -135,6 +161,15 @@ jobs:
           sed -i "s/^version\s*=.*/version = \"${{ inputs.kernel_version }}\"/" config.toml
           grep "^version" config.toml
 
+      - name: Ustaw architekturę docelową
+        run: |
+          sed -i "s/^arch\s*=.*/arch = \"${{ env.TARGET_ARCH }}\"/" config.toml
+          # Jeśli linii arch nie ma — dodaj ją w sekcji [kernel]
+          grep -q "^arch\s*=" config.toml || \
+            sed -i "/^\[kernel\]/a arch = \"${{ env.TARGET_ARCH }}\"" config.toml
+          echo "arch ustawiona na: ${{ env.TARGET_ARCH }}"
+          grep "arch" config.toml || true
+
       - name: Wymuś cpu_level = v3
         run: |
           sed -i "s/^cpu_level\s*=.*/cpu_level = \"v3\"/" config.toml
@@ -167,7 +202,7 @@ jobs:
       - name: Upload RPM
         uses: actions/upload-artifact@v4
         with:
-          name: "legendaryos-kernel-${{ needs.validate.outputs.kernel_version }}-x86-64-v3"
+          name: "legendaryos-kernel-${{ needs.validate.outputs.kernel_version }}-${{ env.TARGET_ARCH }}-v3"
           path: output/**/*.rpm
           retention-days: 30
           if-no-files-found: error
@@ -187,12 +222,13 @@ jobs:
         if: always()
         run: |
           KV="${{ needs.validate.outputs.kernel_version }}"
-          echo "## LegendaryOS Kernel ${KV} [x86-64-v3]" >> "$GITHUB_STEP_SUMMARY"
+          echo "## LegendaryOS Kernel ${KV} [${{ env.TARGET_ARCH }}-v3]" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Parametr | Wartość |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Wersja kernela | \`${KV}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CPU target | \`x86-64-v3\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Architektura | \`${{ env.TARGET_ARCH }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CPU target | \`${{ env.TARGET_ARCH }}-v3\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Runner | \`ubuntu-24.04 / $(nproc) vCPU\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Pliki RPM" >> "$GITHUB_STEP_SUMMARY"
