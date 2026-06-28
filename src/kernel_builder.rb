@@ -75,6 +75,19 @@ class KernelBuilder
       @log
     )
 
+    # modules_install tworzy symlinki build/ i source/ wskazujące na drzewo
+    # źródeł na maszynie buildowej — są dangling na docelowym systemie
+    # i powodują błąd rpmbuild "Installed (but unpackaged) file(s) found".
+    # Usuwamy je; akmod-nvidia i DKMS nie potrzebują ich w RPM (są tworzone
+    # przez kernel-devel na docelowym systemie).
+    %w[build source].each do |link|
+      path = File.join(modules, link)
+      if File.symlink?(path) || File.exist?(path)
+        FileUtils.rm_rf(path)
+        @log.info "  → usunięto #{link}/ symlink z staging (dangling po modules_install)"
+      end
+    end
+
     @log.info "Staging gotowy: #{@staging}"
   end
 end
