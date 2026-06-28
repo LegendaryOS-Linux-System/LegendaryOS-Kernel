@@ -29,7 +29,7 @@ class RpmPackager
   end
 
   def build_rpm
-    prepare_rpm_tree
+    prepare_rpm_tree  # musi być przed write_spec — wykrywa actual_kver
     write_spec
 
     @log.info "Uruchamianie rpmbuild..."
@@ -59,9 +59,6 @@ class RpmPackager
       FileUtils.mkdir_p(File.join(@rpm_root, d))
     end
 
-    # BUILDROOT nazwa musi pasować do: Name-Version-Release.Arch
-    # Version w spec = kernel_version (np. "7.1"), Release = release_tag
-    # ale katalog modułów = full_version (np. "7.1-legendaryos")
     buildroot = File.join(
       @rpm_root, "BUILDROOT",
       "legendaryos-kernel-#{@cfg.kernel_version}-#{@cfg.release_tag}.#{@cfg.arch}"
@@ -70,15 +67,23 @@ class RpmPackager
     FileUtils.cp_r(@staging + "/.", buildroot)
     @log.info "BUILDROOT: #{buildroot}"
 
-    # Zweryfikuj że moduły są w oczekiwanej ścieżce
-    mod_path = File.join(buildroot, "lib", "modules", @cfg.full_version)
-    unless Dir.exist?(mod_path)
-      # Sprawdź co faktycznie jest w lib/modules/
-      found = Dir[File.join(buildroot, "lib", "modules", "*")].map { |p| File.basename(p) }
-      raise Error, "Brak modułów w #{mod_path}. " \
-                   "Znalezione katalogi modułów: #{found.join(', ')}. " \
-                   "Sprawdź czy full_version (#{@cfg.full_version}) zgadza się z tym co kernel instaluje."
+    # Wykryj rzeczywisty katalog modułów (kernel może dodać .0: 7.1 → 7.1.0)
+    mod_dirs = Dir[File.join(buildroot, "lib", "modules", "*legendaryos*")]
+    if mod_dirs.empty?
+      all = Dir[File.join(buildroot, "lib", "modules", "*")].map { |p| File.basename(p) }
+      raise Error, "Brak katalogu modułów *legendaryos* w BUILDROOT/lib/modules/. " \
+                   "Znalezione: #{all.join(', ')}"
     end
+    actual_kver = File.basename(mod_dirs.first)
+    @log.info "Wykryty katalog modułów: #{actual_kver}"
+
+    # Zapisz rzeczywistą wersję żeby spec mógł jej użyć
+    @actual_kver = actual_kver
+  end
+
+  # Rzeczywista wersja kernela wykryta z staging (np. 7.1.0-legendaryos)
+  def actual_kver
+    @actual_kver || @cfg.full_version
   end
 
   # Buduje opis optymalizacji do %description i %changelog
@@ -100,6 +105,7 @@ class RpmPackager
 
   def render_spec
     cfg      = @cfg
+    kver     = actual_kver   # rzeczywista wersja: np. 7.1.0-legendaryos (nie 7.1-legendaryos)
     features = feature_list
     ERB.new(SPEC_TEMPLATE, trim_mode: "-").result(binding)
   end
@@ -139,21 +145,40 @@ class RpmPackager
 
     # ==========================================================================
     # %install — generuj listę plików przez find (wildcard ** nie działa w rpmbuild)
+    # %P jest znakiem specjalnym RPM — escapujemy jako %%P w spec template
+    # Rzeczywisty katalog modułów wykrywamy dynamicznie (kernel dodaje .0 do wersji)
     # ==========================================================================
     %install
     rm -f %{_builddir}/filelist.txt
 
-    # /boot
-    echo "/boot/<%= cfg.kernel_image_name %>-<%= cfg.full_version %>" >> %{_builddir}/filelist.txt
-    [ -f "%{buildroot}/boot/System.map-<%= cfg.full_version %>" ] && \
-      echo "/boot/System.map-<%= cfg.full_version %>" >> %{_builddir}/filelist.txt || true
-    echo "/boot/config-<%= cfg.full_version %>" >> %{_builddir}/filelist.txt
+    # Wykryj rzeczywisty katalog modułów (kernel.org dodaje .0: 7.1 → 7.1.0)
+    KMOD_DIR=$(ls -d %{buildroot}/lib/modules/*legendaryos* 2>/dev/null | head -1)
+    if [ -z "$KMOD_DIR" ]; then
+      echo "BŁĄD: Brak katalogu modułów w %{buildroot}/lib/modules/"
+      ls %{buildroot}/lib/modules/ || true
+      exit 1
+    fi
+    KVER=$(basename "$KMOD_DIR")
+    echo "Wykryty katalog modułów: $KVER"
 
-    # /lib/modules — find zamiast wildcard
-    echo "%dir /lib/modules/<%= cfg.full_version %>" >> %{_builddir}/filelist.txt
-    find %{buildroot}/lib/modules/<%= cfg.full_version %> -mindepth 1 \
-      \( -type f -o -type l \) \
-      -printf "/lib/modules/<%= cfg.full_version %>/%P\n" >> %{_builddir}/filelist.txt
+    # Wykryj obraz kernela w /boot
+    KIMG=$(ls %{buildroot}/boot/<%= cfg.kernel_image_name %>-* 2>/dev/null | head -1)
+    if [ -z "$KIMG" ]; then
+      echo "BŁĄD: Brak obrazu kernela w %{buildroot}/boot/"
+      ls %{buildroot}/boot/ || true
+      exit 1
+    fi
+    echo "/boot/$(basename $KIMG)" >> %{_builddir}/filelist.txt
+
+    # System.map i config
+    [ -f "%{buildroot}/boot/System.map-${KVER}" ] &&       echo "/boot/System.map-${KVER}" >> %{_builddir}/filelist.txt || true
+    [ -f "%{buildroot}/boot/config-${KVER}" ] &&       echo "/boot/config-${KVER}" >> %{_builddir}/filelist.txt || true
+
+    # /lib/modules — find z %%P (escapowany, RPM nie interpretuje)
+    echo "%%dir /lib/modules/${KVER}" >> %{_builddir}/filelist.txt
+    find "$KMOD_DIR" -mindepth 1 \( -type f -o -type l \) | while read F; do
+      echo "/lib/modules/${KVER}/${F#${KMOD_DIR}/}"
+    done >> %{_builddir}/filelist.txt
 
     %files -f %{_builddir}/filelist.txt
     %defattr(-,root,root,-)
@@ -163,7 +188,7 @@ class RpmPackager
     # ==========================================================================
     %pre
     OLD_VMLINUZ=$(ls /boot/vmlinuz-*legendaryos* 2>/dev/null | head -1)
-    if [ -n "$OLD_VMLINUZ" ] && [ "$OLD_VMLINUZ" != "/boot/vmlinuz-<%= cfg.full_version %>" ]; then
+    if [ -n "$OLD_VMLINUZ" ] && [ "$OLD_VMLINUZ" != "/boot/vmlinuz-<%= kver %>" ]; then
         echo "[LegendaryOS] Usuwanie starego kernela z GRUB: $OLD_VMLINUZ"
         grubby --remove-kernel="$OLD_VMLINUZ" 2>/dev/null || true
         OLD_VER=$(basename "$OLD_VMLINUZ" | sed 's/vmlinuz-//')
@@ -177,7 +202,7 @@ class RpmPackager
     %post
     set -e
 
-    KVER="<%= cfg.full_version %>"
+    KVER="<%= kver %>"
     VMLINUZ="/boot/vmlinuz-${KVER}"
     INITRD="/boot/initramfs-${KVER}.img"
 
@@ -242,14 +267,14 @@ class RpmPackager
     # ==========================================================================
     %postun
     if [ $1 -eq 0 ]; then
-        VMLINUZ="/boot/vmlinuz-<%= cfg.full_version %>"
-        echo "[LegendaryOS] Odinstalowywanie kernela <%= cfg.full_version %>..."
+        VMLINUZ="/boot/vmlinuz-<%= kver %>"
+        echo "[LegendaryOS] Odinstalowywanie kernela <%= kver %>..."
 
         grubby --remove-kernel="${VMLINUZ}" 2>/dev/null || true
 
         # Usuń initramfs
-        rm -f "/boot/initramfs-<%= cfg.full_version %>.img" 2>/dev/null || true
-        rm -f "/boot/initramfs-<%= cfg.full_version %>-rescue.img" 2>/dev/null || true
+        rm -f "/boot/initramfs-<%= kver %>.img" 2>/dev/null || true
+        rm -f "/boot/initramfs-<%= kver %>-rescue.img" 2>/dev/null || true
 
         # Przywróć ostatni dostępny kernel jako domyślny
         LATEST_VMLINUZ=$(grubby --info=ALL 2>/dev/null \
@@ -271,7 +296,7 @@ class RpmPackager
             done
         fi
 
-        echo "[LegendaryOS] Kernel <%= cfg.full_version %> usunięty. Uruchom ponownie system."
+        echo "[LegendaryOS] Kernel <%= kver %> usunięty. Uruchom ponownie system."
     fi
 
     %changelog
