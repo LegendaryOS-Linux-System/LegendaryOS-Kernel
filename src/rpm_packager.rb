@@ -59,12 +59,26 @@ class RpmPackager
       FileUtils.mkdir_p(File.join(@rpm_root, d))
     end
 
+    # BUILDROOT nazwa musi pasować do: Name-Version-Release.Arch
+    # Version w spec = kernel_version (np. "7.1"), Release = release_tag
+    # ale katalog modułów = full_version (np. "7.1-legendaryos")
     buildroot = File.join(
       @rpm_root, "BUILDROOT",
       "legendaryos-kernel-#{@cfg.kernel_version}-#{@cfg.release_tag}.#{@cfg.arch}"
     )
     FileUtils.rm_rf(buildroot)
-    FileUtils.cp_r(@staging, buildroot)
+    FileUtils.cp_r(@staging + "/.", buildroot)
+    @log.info "BUILDROOT: #{buildroot}"
+
+    # Zweryfikuj że moduły są w oczekiwanej ścieżce
+    mod_path = File.join(buildroot, "lib", "modules", @cfg.full_version)
+    unless Dir.exist?(mod_path)
+      # Sprawdź co faktycznie jest w lib/modules/
+      found = Dir[File.join(buildroot, "lib", "modules", "*")].map { |p| File.basename(p) }
+      raise Error, "Brak modułów w #{mod_path}. " \
+                   "Znalezione katalogi modułów: #{found.join(', ')}. " \
+                   "Sprawdź czy full_version (#{@cfg.full_version}) zgadza się z tym co kernel instaluje."
+    end
   end
 
   # Buduje opis optymalizacji do %description i %changelog
@@ -123,13 +137,26 @@ class RpmPackager
     CPU target: <%= cfg.cpu_level_label %>
     Źródła: Linux <%= cfg.kernel_version %><%= cfg.localversion %>
 
-    %files
+    # ==========================================================================
+    # %install — generuj listę plików przez find (wildcard ** nie działa w rpmbuild)
+    # ==========================================================================
+    %install
+    rm -f %{_builddir}/filelist.txt
+
+    # /boot
+    echo "/boot/<%= cfg.kernel_image_name %>-<%= cfg.full_version %>" >> %{_builddir}/filelist.txt
+    [ -f "%{buildroot}/boot/System.map-<%= cfg.full_version %>" ] && \
+      echo "/boot/System.map-<%= cfg.full_version %>" >> %{_builddir}/filelist.txt || true
+    echo "/boot/config-<%= cfg.full_version %>" >> %{_builddir}/filelist.txt
+
+    # /lib/modules — find zamiast wildcard
+    echo "%dir /lib/modules/<%= cfg.full_version %>" >> %{_builddir}/filelist.txt
+    find %{buildroot}/lib/modules/<%= cfg.full_version %> -mindepth 1 \
+      \( -type f -o -type l \) \
+      -printf "/lib/modules/<%= cfg.full_version %>/%P\n" >> %{_builddir}/filelist.txt
+
+    %files -f %{_builddir}/filelist.txt
     %defattr(-,root,root,-)
-    /boot/vmlinuz-<%= cfg.full_version %>
-    /boot/System.map-<%= cfg.full_version %>
-    /boot/config-<%= cfg.full_version %>
-    %dir /lib/modules/<%= cfg.full_version %>
-    /lib/modules/<%= cfg.full_version %>/**
 
     # ==========================================================================
     # %pre — usuń stary LegendaryOS kernel z GRUBa przed instalacją nowego
