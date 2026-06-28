@@ -28,6 +28,7 @@ class KernelConfigurator
     @log.info "CPU target: #{@cfg.cpu_level_label}"
 
     apply_base_config
+    sanitize_distro_config # usuwa ścieżki do certów/kluczy specyficzne dla dystrybucji
     apply_auto_patches     # BORE, Valve VRAM (pobrane z GitHub)
     apply_user_patches     # patches/*.patch użytkownika
     apply_nvidia_tweaks    if @cfg.nvidia_enabled?
@@ -67,6 +68,53 @@ class KernelConfigurator
       raise Error, "Pobieranie .config Fedory nie powiodło się" unless File.exist?(dot_config) && File.size(dot_config) > 1024
     end
     @log.info "Baza .config Fedory gotowa."
+  end
+
+  # ===========================================================================
+  # 1b. SANITYZACJA .config DYSTRYBUCJI
+  #
+  # Konfiguracje z Ubuntu/Debian/Fedora/Azure zawierają ścieżki do certyfikatów
+  # i kluczy podpisywania które są specyficzne dla danej dystrybucji i nie
+  # istnieją w czystym drzewie źródeł kernela.org. Próba kompilacji bez
+  # wyczyszczenia tych opcji kończy się błędem:
+  #   "No rule to make target 'debian/canonical-certs.pem'"
+  #
+  # Zerujemy te opcje — kernel buduje się bez podpisywania modułów,
+  # co jest poprawne dla custom kernela.
+  # ===========================================================================
+  def sanitize_distro_config
+    @log.info "Sanityzacja .config — czyszczenie ścieżek certyfikatów dystrybucji..."
+
+    # Opcje z ścieżkami do plików cert/klucz — zerujemy do pustego stringa
+    cert_options = %w[
+      CONFIG_SYSTEM_TRUSTED_KEYS
+      CONFIG_SYSTEM_EXTRA_CERTIFICATE
+      CONFIG_MODULE_SIG_KEY
+    ]
+
+    cert_options.each do |opt|
+      content = File.read(dot_config)
+      # Dopasuj: CONFIG_FOO="jakaś/ścieżka" lub CONFIG_FOO=jakas/sciezka
+      if content.match?(/^#{Regexp.escape(opt)}=/)
+        @log.info "  → zerowanie #{opt}"
+        set_config_option(opt, '""')
+      end
+    end
+
+    # Opcje które powinny być wyłączone przy custom kernelu bez kluczy dystrybucji
+    disable_options = %w[
+      CONFIG_SYSTEM_REVOCATION_KEYS
+    ]
+
+    disable_options.each do |opt|
+      content = File.read(dot_config)
+      if content.match?(/^#{Regexp.escape(opt)}=/)
+        @log.info "  → wyłączanie #{opt}"
+        set_config_option(opt, '""')
+      end
+    end
+
+    @log.info "Sanityzacja .config zakończona."
   end
 
   # ===========================================================================
