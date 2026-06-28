@@ -87,6 +87,22 @@ class KernelConfigurator
 
   # ===========================================================================
   # 3. PATCHE UŻYTKOWNIKA
+  #
+  # Obsługuje dwa typy plików (rekurencyjnie przez podkatalogi):
+  #
+  #   *.patch  — prawdziwy diff na kodzie źródłowym kernela (patch -p1)
+  #              Użyj dla: BORE scheduler z GitHub, własnych poprawek kodu
+  #              Ryzyko: mogą nie pasować gdy zmienisz wersję kernela
+  #
+  #   *.config — fragment konfiguracji kconfig nakładany na .config
+  #              Użyj dla: własnych opcji CONFIG_*, zawsze działa
+  #              Format: standardowy kconfig, linia po linii:
+  #                CONFIG_FOO=y
+  #                # CONFIG_BAR is not set
+  #                CONFIG_BAZ=1234
+  #
+  # Kolejność stosowania: alfabetyczna, podkatalogi po plikach z roota.
+  # Podkatalogi gaming/ i nvidia/ są skanowane automatycznie.
   # ===========================================================================
   def apply_user_patches
     patches_dir = File.expand_path(@cfg.patches_dir)
@@ -95,23 +111,78 @@ class KernelConfigurator
       return
     end
 
-    patches = Dir[File.join(patches_dir, "*.patch")].sort
-    if patches.empty?
-      @log.info "Brak plików *.patch w #{patches_dir}."
+    # Zbierz pliki rekurencyjnie: najpierw root, potem podkatalogi — wszystko posortowane
+    source_patches = Dir[File.join(patches_dir, "*.patch")].sort
+    config_frags   = Dir[File.join(patches_dir, "*.config")].sort
+    sub_patches    = Dir[File.join(patches_dir, "**", "*.patch")].reject { |f| File.dirname(f) == patches_dir }.sort
+    sub_configs    = Dir[File.join(patches_dir, "**", "*.config")].reject { |f| File.dirname(f) == patches_dir }.sort
+
+    all_source  = source_patches + sub_patches
+    all_configs = config_frags   + sub_configs
+
+    if all_source.empty? && all_configs.empty?
+      @log.info "Brak patchy użytkownika w #{patches_dir} (ani *.patch ani *.config)."
       return
     end
 
-    @log.info "Stosowanie #{patches.size} patch(y) użytkownika..."
-    apply_patch_list(patches)
+    unless all_source.empty?
+      @log.info "Stosowanie #{all_source.size} patch(y) źródłowych (patch -p1)..."
+      apply_source_patch_list(all_source)
+    end
+
+    unless all_configs.empty?
+      @log.info "Stosowanie #{all_configs.size} fragmentu/ów konfiguracji (*.config)..."
+      apply_config_fragment_list(all_configs)
+    end
   end
 
-  def apply_patch_list(patches)
+  # Stosuje prawdziwe diffy na kodzie źródłowym kernela
+  def apply_source_patch_list(patches)
     patches.each do |patch|
-      @log.info "  patch: #{File.basename(patch)}"
+      rel = patch.sub(File.expand_path(@cfg.patches_dir) + "/", "")
+      @log.info "  [patch]  #{rel}"
       Utils.run!(
         "patch -d #{@src.shellescape} -p1 --forward --no-backup-if-mismatch < #{patch.shellescape}",
         @log
       )
+    end
+  end
+
+  # Nakłada fragment kconfig na .config — działa jak merge, linia po linii
+  # Obsługuje:
+  #   CONFIG_FOO=y          → włącza
+  #   # CONFIG_FOO is not set → wyłącza
+  #   CONFIG_FOO=1234       → ustawia wartość
+  def apply_config_fragment_list(frags)
+    frags.each do |frag|
+      rel = frag.sub(File.expand_path(@cfg.patches_dir) + "/", "")
+      @log.info "  [config] #{rel}"
+      File.readlines(frag, chomp: true).each do |line|
+        line = line.strip
+        next if line.empty?
+
+        if (m = line.match(/^(CONFIG_\w+)=(.+)$/))
+          # CONFIG_FOO=y / CONFIG_FOO=m / CONFIG_FOO="string" / CONFIG_FOO=1234
+          val = case m[2]
+                when "y" then :enable
+                when "m" then :module
+                when "n" then :disable
+                else m[2]
+                end
+          set_config_option(m[1], val)
+
+        elsif (m = line.match(/^#\s*(CONFIG_\w+)\s+is not set$/))
+          # # CONFIG_FOO is not set
+          set_config_option(m[1], :disable)
+
+        elsif line.start_with?("#")
+          # Zwykły komentarz — pomijamy
+          next
+
+        else
+          @log.warn "  [config] Nieznana linia, pomijam: #{line}"
+        end
+      end
     end
   end
 
