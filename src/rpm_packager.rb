@@ -107,6 +107,10 @@ class RpmPackager
     Provides:       kernel = %{version}-%{release}
     Obsoletes:      legendaryos-kernel < %{version}
 
+    # Nie przerywaj buildu gdy rpmbuild znajdzie pliki nieuwzględnione w %files.
+    # Wszystkie moduły .ko są pakowane przez wildcard /lib/modules/%%{kver}/**
+    %define _unpackaged_files_terminate_build 0
+
     %description
     LegendaryOS Kernel — jądro Linuxa dla dystrybucji LegendaryOS (Fedora-based).
     Zoptymalizowane pod gaming i sterowniki NVIDIA proprietary (akmod-nvidia).
@@ -124,7 +128,8 @@ class RpmPackager
     /boot/vmlinuz-<%= cfg.full_version %>
     /boot/System.map-<%= cfg.full_version %>
     /boot/config-<%= cfg.full_version %>
-    /lib/modules/<%= cfg.full_version %>/
+    %dir /lib/modules/<%= cfg.full_version %>
+    /lib/modules/<%= cfg.full_version %>/**
 
     # ==========================================================================
     # %pre — usuń stary LegendaryOS kernel z GRUBa przed instalacją nowego
