@@ -58,16 +58,27 @@ class KernelConfigurator
 
   def fetch_fedora_config
     running_config = "/boot/config-#{`uname -r`.strip}"
-    if File.exist?(running_config)
-      @log.info "Kopiowanie .config z działającego jądra Fedory: #{running_config}"
+
+    # Dla cross-kompilacji (budujemy ARM64 na x86) nie możemy użyć lokalnego
+    # /boot/config — jest dla złej architektury. Zawsze pobieramy z Fedora SCM.
+    if File.exist?(running_config) && !@cfg.cross_compile?
+      @log.info "Kopiowanie .config z działającego jądra: #{running_config}"
       FileUtils.cp(running_config, dot_config)
     else
-      @log.warn "Nie znaleziono /boot/config-$(uname -r) — pobieranie z Fedora SCM..."
-      fedora_config_url = "https://src.fedoraproject.org/rpms/kernel/raw/main/f/kernel-#{@cfg.arch}.config"
+      if @cfg.cross_compile?
+        @log.info "Cross-kompilacja #{@cfg.arch} — pobieranie .config z Fedora SCM..."
+      else
+        @log.warn "Nie znaleziono /boot/config-$(uname -r) — pobieranie z Fedora SCM..."
+      end
+
+      # Fedora SCM używa "aarch64" jako nazwy arch w plikach config
+      fedora_arch = @cfg.arch  # "x86_64" lub "aarch64" — pasuje do nazwy pliku Fedory
+      fedora_config_url = "https://src.fedoraproject.org/rpms/kernel/raw/main/f/kernel-#{fedora_arch}.config"
+      @log.info "Pobieranie: #{fedora_config_url}"
       Utils.run!("curl -L -s -o #{dot_config.shellescape} #{fedora_config_url.shellescape}", @log)
       raise Error, "Pobieranie .config Fedory nie powiodło się" unless File.exist?(dot_config) && File.size(dot_config) > 1024
     end
-    @log.info "Baza .config Fedory gotowa."
+    @log.info "Baza .config (#{@cfg.arch}) gotowa."
   end
 
   # ===========================================================================
@@ -511,7 +522,7 @@ class KernelConfigurator
   # ===========================================================================
   def finalize_config
     @log.info "Uruchamianie make olddefconfig..."
-    Utils.run!("make -C #{@src.shellescape} olddefconfig", @log)
+    Utils.run!("make -C #{@src.shellescape} ARCH=#{@cfg.kernel_arch.shellescape} olddefconfig", @log)
     @log.info "Konfiguracja kernela zakończona."
   end
 
